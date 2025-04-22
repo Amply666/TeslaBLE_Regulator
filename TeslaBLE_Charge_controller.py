@@ -1,7 +1,10 @@
 # tesla_charging_control.py
 
 import logging
+import time
 import os
+import requests
+import paho.mqtt.client as mqtt
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 
@@ -13,7 +16,7 @@ MQTT_PORT = 1883
 
 TOPIC_TESLA_STATE = "teslamate/cars/1/charging_state"
 TOPIC_TESLA_SOC = "teslamate/cars/1/battery_level"
-TOPIC_SHELLY_POWER = "shellies/shellyem-1/emeter/0/power"
+TOPIC_SHELLY_POWER = "shellies/shellyem-C45BBEE1F292/emeter/0/power"
 TOPIC_TESLA_PLUGGED = "teslamate/cars/1/plugged_in"
 TOPIC_TESLA_CURRENT_REQ = "teslamate/cars/1/charge_current_request"
 TOPIC_TESLA_SOC_LIMIT = "teslamate/cars/1/charge_limit_soc"
@@ -71,14 +74,14 @@ HA_TESLA_CHRG_LIMIT = "number.tesla_ble_498658_charging_limit"
 
 # === Parametri di controllo ===
 POTENZA_SICUREZZA_MAX = 3500
-POTENZA_CARICA_MINIMA = 1500 #1500W per la ricarica notturna fino al 70%
+POTENZA_CARICA_MINIMA = 2500 #2500W per la ricarica notturna fino al CHARGE_LIMIT_SOC
 AMP_MIN = 5
 AMP_MAX = 32
 VOLT = 230
-WATT_TOLLERANZA = 5
+WATT_TOLLERANZA = 200 
 MODIFICA_STEP = 1
 DELAY_SECONDI = 10
-CHARGE_LIMIT_SOC = 70 #Limite di carica mandatoria 70%
+CHARGE_LIMIT_SOC = 60 #Limite di carica mandatoria 60%
 CHARGE_LIMIT_MAX = 100 #Limite massimo di ricarica impostabile 100%
 # === Stati di ricarica ===
 CHARGING_STATE_STOPPED = "stopped"
@@ -131,39 +134,37 @@ def ricarica_fotovoltaico():
     global corrente_attuale, soc_limit, soc_attuale, stato_ricarica
     print(f"📊 Stato ➜ SOC: {soc_attuale}%, Limite: {soc_limit}%, Corrente: {corrente_attuale}A, Potenza: {potenza_mqtt}W, Stato: {stato_ricarica}")
     print("☀️ Modalità fotovoltaico attiva")
-        
+
     if soc_limit != CHARGE_LIMIT_MAX:
-        print(f"🔧 Limite di ricarica non impostato a {CHARGE_LIMIT_MAX}. Lo aggiorno...")
-        if send_ha_command(HA_TESLA_CHRG_LIMIT, "number/set_value", CHARGE_LIMIT_MAX):
-            soc_limit = CHARGE_LIMIT_MAX
-            
+        print(f"🔋 Limite carica impostato a {CHARGE_LIMIT_MAX}% .")
+        #se il limite di carica è <> da 100% lo imposto
+        send_ha_command(HA_TESLA_CHRG_LIMIT, "number/set_value", CHARGE_LIMIT_MAX)
+        #soc_limit = CHARGE_LIMIT_SOC
+ 
     if stato_ricarica == CHARGING_STATE_STOPPED:
-        print("🟢 Ricarica non attiva, invio comando di accensione...")
+        print("🟢 Ricarica non attiva in ricarica fotovoltaico, invio comando di accensione...")
         if send_ha_command(HA_TESLA_SWITCH, "switch/turn_on"):
-            # Aggiorniamo lo stato solo se il comando ha avuto successo
             stato_ricarica = CHARGING_STATE_CHARGING
-        
-    # Se stiamo assorbendo troppo dalla rete, riduciamo la corrente
-    if potenza_mqtt > WATT_TOLLERANZA:
-        if corrente_attuale > AMP_MIN:
-            corrente_attuale = max(AMP_MIN, corrente_attuale - MODIFICA_STEP)
-            print(f"⬇️ Riduzione corrente a {corrente_attuale}A (sopra tolleranza)")
+    
+    if potenza_mqtt > WATT_TOLLERANZA and corrente_attuale > AMP_MIN:
+        corrente_attuale = max(AMP_MIN, corrente_attuale - MODIFICA_STEP)
+        print(f"⬇️ Riduzione corrente a {corrente_attuale}A")
+        send_ha_command(HA_TESLA_AMPERE, "number/set_value", corrente_attuale)  
+    
+    if corrente_attuale !=  charge_current_request:
+        print(f"[Anomalia] corrente_attuale:{corrente_attuale} - charge_current_request: {charge_current_request}A ")
+        if abs(corrente_attuale - charge_current_request) != 1:
+            corrente_attuale = charge_current_request
+            print(f"[Anomalia] Impostato corrente_attuale = charge_current_request: {charge_current_request}A ")
+        return    
+    elif potenza_mqtt <= WATT_TOLLERANZA and corrente_attuale < AMP_MAX:
+        potenza_nuova = round(potenza_mqtt + ((VOLT+20) * MODIFICA_STEP))
+        if potenza_nuova <= WATT_TOLLERANZA:
+            corrente_attuale = min(AMP_MAX, corrente_attuale + MODIFICA_STEP)
+            print(f"⬆️ Nuova Potenza {potenza_nuova}W - potenza_mqtt:{potenza_mqtt}W - Aumento corrente a {corrente_attuale}A")
             send_ha_command(HA_TESLA_AMPERE, "number/set_value", corrente_attuale)
-        else:
-            # Se siamo già al minimo e ancora assorbiamo troppo, fermiamo
-            print("⚠️ Assorbimento eccessivo anche con corrente minima, arresto ricarica")
-            arresta_ricarica("Assorbimento eccessivo in modalità fotovoltaico")
-    # Se stiamo immettendo (potenza negativa) aumentiamo la corrente
-    elif potenza_mqtt < -WATT_TOLLERANZA and corrente_attuale < AMP_MAX:
-        # Calcoliamo quanto possiamo aumentare in base alla potenza disponibile
-        potenza_disponibile = abs(potenza_mqtt) - WATT_TOLLERANZA
-        step_possibili = int(potenza_disponibile / VOLT)
-        step_da_applicare = min(MODIFICA_STEP, step_possibili)
-        
-        if step_da_applicare > 0:
-            corrente_attuale = min(AMP_MAX, corrente_attuale + step_da_applicare)
-            print(f"⬆️ Aumento corrente a {corrente_attuale}A (sovrapproduzione)")
-            send_ha_command(HA_TESLA_AMPERE, "number/set_value", corrente_attuale)  
+        else: 
+            print(f"[🤚] Nuova potenza {potenza_nuova} - potenza_mqtt:{potenza_mqtt} No MODIFICHE limit: {WATT_TOLLERANZA}")
 
 def arresta_ricarica(causa_arresto):
     global corrente_attuale, stato_ricarica
@@ -180,30 +181,37 @@ def arresta_ricarica(causa_arresto):
     
 def ricarica_prioritaria():
     global corrente_attuale, soc_limit, stato_ricarica, soc_attuale
+    print(f"⚙️ Modalità ricarica prioritaria: Bilancio={potenza_mqtt}W, Corrente={corrente_attuale}A, Corrente Tesla={charge_current_request}")
     if soc_limit != CHARGE_LIMIT_SOC:
-        if send_ha_command(HA_TESLA_CHRG_LIMIT, "number/set_value", CHARGE_LIMIT_SOC):
-            soc_limit = CHARGE_LIMIT_SOC
-            print(f"🔋 Limite carica impostato a {CHARGE_LIMIT_SOC}% .")
+        print(f"🔋 Limite carica impostato a {CHARGE_LIMIT_SOC}% .")
+        #se il limite di carica è <> da 100% lo imposto
+        send_ha_command(HA_TESLA_CHRG_LIMIT, "number/set_value", CHARGE_LIMIT_SOC)
+        #soc_limit = CHARGE_LIMIT_SOC
  
     if stato_ricarica == CHARGING_STATE_STOPPED:
         print("🟢 Ricarica non attiva in ricarica prioritaria, invio comando di accensione...")
         if send_ha_command(HA_TESLA_SWITCH, "switch/turn_on"):
             stato_ricarica = CHARGING_STATE_CHARGING
-   
-    print(f"⚙️ Modalità ricarica prioritaria: Bilancio={potenza_mqtt}W, Corrente={corrente_attuale}A")
-
+    
     if potenza_mqtt > POTENZA_CARICA_MINIMA and corrente_attuale > AMP_MIN:
         corrente_attuale = max(AMP_MIN, corrente_attuale - MODIFICA_STEP)
         print(f"⬇️ Riduzione corrente a {corrente_attuale}A")
         send_ha_command(HA_TESLA_AMPERE, "number/set_value", corrente_attuale)  
-
+    
+    if corrente_attuale !=  charge_current_request:
+        print(f"[Anomalia] corrente_attuale:{corrente_attuale} - charge_current_request: {charge_current_request}A ")
+        if abs(corrente_attuale - charge_current_request) != 1:
+            corrente_attuale = charge_current_request
+            print(f"[Anomalia] Impostato corrente_attuale = charge_current_request: {charge_current_request}A ")
+        return    
     elif potenza_mqtt <= POTENZA_CARICA_MINIMA and corrente_attuale < AMP_MAX:
-        potenza_nuova = potenza_mqtt + (VOLT * MODIFICA_STEP)
-        print(f"Nuova potenza {potenza_nuova} - potenza_mqtt:{potenza_mqtt}")
+        potenza_nuova = round(potenza_mqtt + ((VOLT+20) * MODIFICA_STEP))
         if potenza_nuova <= POTENZA_CARICA_MINIMA:
             corrente_attuale = min(AMP_MAX, corrente_attuale + MODIFICA_STEP)
-            print(f"⬆️ Aumento corrente a {corrente_attuale}A")
+            print(f"⬆️ Nuova Potenza {potenza_nuova}W - potenza_mqtt:{potenza_mqtt}W - Aumento corrente a {corrente_attuale}A")
             send_ha_command(HA_TESLA_AMPERE, "number/set_value", corrente_attuale)
+        else: 
+            print(f"[🤚] Nuova potenza {potenza_nuova} - potenza_mqtt:{potenza_mqtt} No MODIFICHE limit: {POTENZA_CARICA_MINIMA}")
     
 def on_message(client, userdata, msg):
     global potenza_mqtt, plugged_in, charge_current_request, soc_limit, soc_attuale, ricarica_automatica, corrente_attuale, stato_ricarica
@@ -227,8 +235,6 @@ def on_message(client, userdata, msg):
         elif topic == TOPIC_RICARICA_AUTOMATICA:
             ricarica_automatica = payload.lower() == "true"
 
-        print(f"[MQTT] Stato aggiornato: W={potenza_mqtt}, Plug={plugged_in}, AReq={charge_current_request}, SOC={soc_limit}, SOC_NOW={soc_attuale}, Auto={ricarica_automatica}, on/off={stato_ricarica}")
-
         if topic == TOPIC_SHELLY_POWER and potenza_mqtt > POTENZA_SICUREZZA_MAX and stato_ricarica == CHARGING_STATE_CHARGING:
             print("🚨 Potenza oltre soglia di sicurezza! Corrente forzata a 5A e spegnimento")
             corrente_attuale = AMP_MIN
@@ -249,6 +255,7 @@ try:
     clean_old_logs()
     client.loop_start()
     while True:
+        print(f"[MQTT] Stato aggiornato: W={potenza_mqtt}, Plug={plugged_in}, AReq={charge_current_request}, SOC={soc_limit}, SOC_NOW={soc_attuale}, Auto={ricarica_automatica}, on/off={stato_ricarica}")
         # Controllo di sicurezza
         if potenza_mqtt >= POTENZA_SICUREZZA_MAX: 
             print(f"PERICOLO!!! Potenza oltre soglia di sicurezza 🚨 🚨 🚨 W attuali: {potenza_mqtt}")
@@ -259,34 +266,43 @@ try:
         # Controlli preliminari
         if not ricarica_automatica:
             print("⚙️ Ricarica automatica disattivata. Nessuna regolazione eseguita.")
-            arresta_ricarica("Disattivazione manuale")
+            #arresta_ricarica("Disattivazione manuale")
             time.sleep(DELAY_SECONDI)
             continue
             
         if not plugged_in:
             print("🔌 Cavo scollegato. Nessuna regolazione necessaria.")
+            logging.info("Cavo scollegato. Nessuna regolazione necessaria.")
             arresta_ricarica("Cavo scollegato")
-            time.sleep(DELAY_SECONDI)
+            time.sleep(DELAY_SECONDI*6)
             continue
             
         if soc_attuale >= 100 and stato_ricarica == CHARGING_STATE_CHARGING:
             arresta_ricarica("Carica completa 100%")
-            time.sleep(DELAY_SECONDI)
+            time.sleep(DELAY_SECONDI*12)
             continue
             
         # Logica di ricarica
-        charge_power = charge_current_request * VOLT
-        surplus_fotovoltaico = potenza_mqtt - charge_power < -1500
-        
+        charge_power = abs(AMP_MIN * VOLT)
+        if stato_ricarica == CHARGING_STATE_CHARGING:
+            print(f"TESLA STATUS: {stato_ricarica}")
+            
+            surplus_fotovoltaico = potenza_mqtt < WATT_TOLLERANZA + VOLT
+        elif stato_ricarica == CHARGING_STATE_STOPPED:
+            print(f"TESLA STATUS: {stato_ricarica}")
+            surplus_fotovoltaico = (potenza_mqtt + charge_power) < WATT_TOLLERANZA
+
+        print(f"[EVENTO] - soc_attuale: {soc_attuale} - potenza_mqtt: {potenza_mqtt} - stato_ricarica: {stato_ricarica} - surplus_fotovoltaico: {surplus_fotovoltaico} ")
+
         if soc_attuale < CHARGE_LIMIT_SOC:
             # Priorità alla ricarica fino al limite minimo
             ricarica_prioritaria()
         elif soc_attuale < CHARGE_LIMIT_MAX and surplus_fotovoltaico:
-            # Sopra il limite minimo ma sotto il massimo e c'è surplus fotovoltaico
+            # Sopra il limite minimo (60%) ma sotto il massimo (100%) e c'è surplus fotovoltaico
             ricarica_fotovoltaico()
         else:
             # Nessuna condizione soddisfatta, fermiamo la ricarica
-            arresta_ricarica("Carica non necessaria")
+            arresta_ricarica("Carica non necessaria o fotovoltaico insufficiente")
         time.sleep(DELAY_SECONDI)
 except KeyboardInterrupt:
     print("Interrotto da tastiera.")
