@@ -15,7 +15,9 @@ Obiettivi specifici:
 - Prevenire superamenti dei 3500 W per evitare interventi degli interruttori magnetotermici.
 
 ---
-
+### 📋 **Prerequisiti**
+Prima di iniziare il progetto è necessario procedere con la configurazione della ESP32 per la connessione BLE con l'auto ed il sistema HomeAssistant seguendo la procedura indicata in questo link: https://github.com/yoziru/esphome-tesla-ble
+---
 #### 🛁 **Input via MQTT**
 
 ##### 🟠 **Shelly EM (produzione/consumo)**
