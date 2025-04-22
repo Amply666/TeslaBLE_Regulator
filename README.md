@@ -72,7 +72,11 @@ Prima di iniziare il progetto è necessario procedere con la configurazione dell
 | `CHARGE_LIMIT_SOC`      | 70     | Soglia minima % riserva energetica       |
 | `POTENZA_CARICA_MINIMA` | 1800   | Potenza massima emergenza sotto SOC (W)  |
 
-
+#### 📌 Dettaglio Parametri
+- **`POTENZA_SICUREZZA_MAX`**
+- Questo parametro indica il limite di sicurezza oltre al quale l'impianto non può andare per motivi di sicurezza, oltre a questo valore potrebbero verivificarsi interruzioni automatiche della corrente a causa del sovravraccarico, quando la potenza assorbita supera questo valore la ricarica dell'auto viene immediatamente abbassata alla soglia minima e interrotta la ricarica. Il valore è espresso in WATT [W]
+- **`AMP_MIN`**
+- Corrente minima impostabile per la ricarica, la regolazione dinamica in caso necessiti di ridurre la corrente di ricarica il valore non può scendere al di sotto degli AMPERE [A] impostati.
 ---
 
 ### ♻️ **Logica di Regolazione Dinamica**
