@@ -72,6 +72,7 @@ Prima di iniziare il progetto è necessario procedere con la configurazione dell
 | `CHARGE_LIMIT_SOC`      | 70     | Soglia minima % riserva energetica       |
 | `POTENZA_CARICA_MINIMA` | 1800   | Potenza massima emergenza sotto SOC (W)  |
 
+
 ---
 
 ### ♻️ **Logica di Regolazione Dinamica**
